@@ -1,4 +1,5 @@
 import { ensureDefined, ensureNotNull } from '../helpers/assertions';
+import { isChromiumBased, isWindows } from '../helpers/browsers';
 import { drawScaled } from '../helpers/canvas-helpers';
 import { Delegate } from '../helpers/delegate';
 import { IDestroyable } from '../helpers/idestroyable';
@@ -35,6 +36,8 @@ export interface MouseEventParamsImpl {
 
 export type MouseEventParamsImplSupplier = () => MouseEventParamsImpl;
 
+const windowsChrome = isChromiumBased() && isWindows();
+
 export class ChartWidget implements IDestroyable {
 	private readonly _options: ChartOptionsInternal;
 	private _paneWidgets: PaneWidget[] = [];
@@ -69,8 +72,9 @@ export class ChartWidget implements IDestroyable {
 		this._element.appendChild(this._tableElement);
 
 		this._onWheelBound = this._onMousewheel.bind(this);
-		this._element.addEventListener('wheel', this._onWheelBound, { passive: false });
-
+		if (shouldSubscribeMouseWheel(this._options)) {
+			this._setMouseWheelEventListener(true);
+		}
 		this._model = new ChartModel(
 			this._invalidateHandler.bind(this),
 			this._options
@@ -129,7 +133,7 @@ export class ChartWidget implements IDestroyable {
 	}
 
 	public destroy(): void {
-		this._element.removeEventListener('wheel', this._onWheelBound);
+		this._setMouseWheelEventListener(false);
 		if (this._drawRafId !== 0) {
 			window.cancelAnimationFrame(this._drawRafId);
 		}
@@ -200,10 +204,18 @@ export class ChartWidget implements IDestroyable {
 	}
 
 	public applyOptions(options: DeepPartial<ChartOptionsInternal>): void {
+		const currentlyHasMouseWheelListener = shouldSubscribeMouseWheel(this._options);
+
 		// we don't need to merge options here because it's done in chart model
 		// and since both model and widget share the same object it will be done automatically for widget as well
 		// not ideal solution for sure, but it work's for now ¯\_(ツ)_/¯
 		this._model.applyOptions(options);
+
+		const shouldHaveMouseWheelListener = shouldSubscribeMouseWheel(this._options);
+		if (shouldHaveMouseWheelListener !== currentlyHasMouseWheelListener) {
+			this._setMouseWheelEventListener(shouldHaveMouseWheelListener);
+		}
+
 		this._updateTimeAxisVisibility();
 
 		const width = options.width || this._width;
@@ -406,31 +418,49 @@ export class ChartWidget implements IDestroyable {
 		}
 	}
 
-	private _onMousewheel(event: WheelEvent): void {
-		let deltaX = event.deltaX / 100;
-		let deltaY = -(event.deltaY / 100);
-
-		if ((deltaX === 0 || !this._options.handleScroll.mouseWheel) &&
-			(deltaY === 0 || !this._options.handleScale.mouseWheel)) {
+	private _setMouseWheelEventListener(add: boolean): void {
+		if (add) {
+			this._element.addEventListener('wheel', this._onWheelBound, { passive: false });
 			return;
 		}
+		this._element.removeEventListener('wheel', this._onWheelBound);
+	}
 
-		if (event.cancelable) {
-			event.preventDefault();
-		}
-
+	private _determineWheelSpeedAdjustment(event: WheelEvent): number {
 		switch (event.deltaMode) {
 			case event.DOM_DELTA_PAGE:
 				// one screen at time scroll mode
-				deltaX *= 120;
-				deltaY *= 120;
-				break;
-
+				return 120;
 			case event.DOM_DELTA_LINE:
 				// one line at time scroll mode
-				deltaX *= 32;
-				deltaY *= 32;
-				break;
+				return 32;
+		}
+
+		if (!windowsChrome) {
+			return 1;
+		}
+
+		// Chromium on Windows has a bug where the scroll speed isn't correctly
+		// adjusted for high density displays. We need to correct for this so that
+		// scroll speed is consistent between browsers.
+		// https://bugs.chromium.org/p/chromium/issues/detail?id=1001735
+		// https://bugs.chromium.org/p/chromium/issues/detail?id=1207308
+		return (1 / window.devicePixelRatio);
+	}
+
+	private _onMousewheel(event: WheelEvent): void {
+		if ((event.deltaX === 0 || !this._options.handleScroll.mouseWheel) &&
+			(event.deltaY === 0 || !this._options.handleScale.mouseWheel)) {
+			return;
+		}
+
+		const scrollSpeedAdjustment = this._determineWheelSpeedAdjustment(event);
+
+		const deltaX = scrollSpeedAdjustment * event.deltaX / 100;
+		const deltaY = -(scrollSpeedAdjustment * event.deltaY / 100);
+
+		if (event.cancelable) {
+			event.preventDefault();
 		}
 
 		if (deltaY !== 0 && this._options.handleScale.mouseWheel) {
@@ -687,4 +717,8 @@ function disableSelection(element: HTMLElement): void {
 
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any,@typescript-eslint/no-unsafe-member-access
 	(element.style as any).webkitTapHighlightColor = 'transparent';
+}
+
+function shouldSubscribeMouseWheel(options: ChartOptionsInternal): boolean {
+	return Boolean(options.handleScroll.mouseWheel || options.handleScale.mouseWheel);
 }
